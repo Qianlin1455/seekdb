@@ -23,10 +23,20 @@ use crate::engine::{self, StartError};
 use crate::parameters;
 use crate::platform;
 
-const SEEKDB_SUCCESS: c_int = 0;
-const SEEKDB_INTERNAL_ERROR: c_int = -1;
-const SEEKDB_INVALID_ARGUMENT: c_int = -2;
+use SeekdbReturnCode::{SEEKDB_INTERNAL_ERROR, SEEKDB_INVALID_ARGUMENT, SEEKDB_SUCCESS};
+
 const ALIAS_SOCKET: &str = "/r/sql.sock";
+
+pub type SeekdbHandle = *mut c_void;
+
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub enum SeekdbReturnCode {
+    SEEKDB_SUCCESS = 0,
+    SEEKDB_INTERNAL_ERROR = -1,
+    SEEKDB_INVALID_ARGUMENT = -2,
+    SEEKDB_NO_MORE_ROWS = -3,
+}
 
 #[repr(C)]
 pub struct SeekdbConnectionOptions {
@@ -98,9 +108,9 @@ fn set_last_open_error(message: &str) {
     LAST_OPEN_ERROR.with(|error| *error.borrow_mut() = CString::new(message).unwrap_or_default());
 }
 
-fn open_failed(code: c_int, message: &str) -> c_int {
+fn open_failed(code: SeekdbReturnCode, message: &str) -> c_int {
     set_last_open_error(message);
-    code
+    code as c_int
 }
 
 unsafe fn read_parameters(
@@ -129,9 +139,9 @@ unsafe fn read_parameters(
 
 #[no_mangle]
 pub unsafe extern "C" fn seekdb_open(
-    directory: *const c_char,
-    parameters: *const *const c_char,
-    out_handle: *mut *mut c_void,
+    db_dir: *const c_char,
+    parameters: *mut *const c_char,
+    out_handle: *mut SeekdbHandle,
 ) -> c_int {
     set_last_open_error("");
     if out_handle.is_null() {
@@ -142,10 +152,10 @@ pub unsafe extern "C" fn seekdb_open(
         Ok(pairs) => pairs,
         Err(message) => return open_failed(SEEKDB_INVALID_ARGUMENT, message),
     };
-    let directory = if directory.is_null() {
+    let directory = if db_dir.is_null() {
         None
     } else {
-        match CStr::from_ptr(directory).to_str() {
+        match CStr::from_ptr(db_dir).to_str() {
             Ok(directory) => Some(directory),
             Err(_) => {
                 return open_failed(SEEKDB_INVALID_ARGUMENT, "the directory must be valid UTF-8")
@@ -160,7 +170,7 @@ pub unsafe extern "C" fn seekdb_open(
         Ok(socket_path) => match Handle::new(&socket_path, &platform::socket_alias_patterns()) {
             Some(handle) => {
                 *out_handle = Box::into_raw(Box::new(handle)).cast();
-                SEEKDB_SUCCESS
+                SEEKDB_SUCCESS as c_int
             }
             None => open_failed(SEEKDB_INTERNAL_ERROR, "cannot prepare the Unix socket path"),
         },
@@ -169,11 +179,11 @@ pub unsafe extern "C" fn seekdb_open(
 
 #[no_mangle]
 pub unsafe extern "C" fn seekdb_connection_options(
-    handle: *mut c_void,
+    handle: SeekdbHandle,
     out_options: *mut SeekdbConnectionOptions,
 ) -> c_int {
     if handle.is_null() || out_options.is_null() {
-        return SEEKDB_INVALID_ARGUMENT;
+        return SEEKDB_INVALID_ARGUMENT as c_int;
     }
     let handle = &*handle.cast::<Handle>();
     out_options.write(SeekdbConnectionOptions {
@@ -184,7 +194,7 @@ pub unsafe extern "C" fn seekdb_connection_options(
         named_pipe: ptr::null(),
         user: c"root".as_ptr(),
     });
-    SEEKDB_SUCCESS
+    SEEKDB_SUCCESS as c_int
 }
 
 #[no_mangle]
@@ -193,10 +203,10 @@ pub extern "C" fn seekdb_last_open_error() -> *const c_char {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn seekdb_close(handle: *mut c_void) -> c_int {
+pub unsafe extern "C" fn seekdb_close(handle: SeekdbHandle) -> c_int {
     if handle.is_null() {
-        return SEEKDB_INVALID_ARGUMENT;
+        return SEEKDB_INVALID_ARGUMENT as c_int;
     }
     drop(Box::from_raw(handle.cast::<Handle>()));
-    SEEKDB_SUCCESS
+    SEEKDB_SUCCESS as c_int
 }

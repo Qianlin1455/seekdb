@@ -13,8 +13,13 @@
 // limitations under the License.
 
 use std::env;
+use std::path::PathBuf;
 
 fn main() {
+    let crate_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    cbindgen::generate(&crate_dir)
+        .expect("cbindgen failed")
+        .write_to_file(crate_dir.join("include").join("seekdb.h"));
     let unix = env::var_os("CARGO_CFG_UNIX").is_some();
     let emscripten = env::var("CARGO_CFG_TARGET_OS").is_ok_and(|os| os == "emscripten");
     if unix && !emscripten {
@@ -23,6 +28,7 @@ fn main() {
             .std("c++17")
             .compile("in_process_cxx");
     }
-    println!("cargo:rerun-if-changed=src/bridge.rs");
+    println!("cargo:rerun-if-changed=src");
+    println!("cargo:rerun-if-changed=cbindgen.toml");
     println!("cargo:rerun-if-changed=include/in_process_server.h");
 }
