@@ -1,0 +1,380 @@
+// Copyright (c) 2026 OceanBase.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::cell::RefCell;
+use std::ffi::{c_char, c_int, c_uint, c_void, CStr, CString};
+use std::fs;
+use std::mem;
+use std::os::unix::fs::symlink;
+use std::ptr;
+
+use crate::engine::{self, StartError};
+use crate::parameters;
+use crate::platform;
+
+const SEEKDB_SUCCESS: c_int = 0;
+const SEEKDB_INTERNAL_ERROR: c_int = -1;
+const SEEKDB_INVALID_ARGUMENT: c_int = -2;
+const ALIAS_SOCKET: &str = "/r/sql.sock";
+
+#[repr(C)]
+pub struct SeekdbConnectionOptions {
+    pub transport: *const c_char,
+    pub port: c_uint,
+    pub host: *const c_char,
+    pub unix_socket: *const c_char,
+    pub named_pipe: *const c_char,
+    pub user: *const c_char,
+}
+
+struct Handle {
+    socket_path: CString,
+    alias_directory: Option<String>,
+}
+
+impl Handle {
+    fn new(engine_socket: &str, alias_patterns: &[String]) -> Option<Handle> {
+        if engine_socket.len() < sun_path_capacity() {
+            return Some(Handle {
+                socket_path: CString::new(engine_socket).ok()?,
+                alias_directory: None,
+            });
+        }
+        let alias_directory = alias_patterns
+            .iter()
+            .filter(|pattern| pattern.len() + ALIAS_SOCKET.len() < sun_path_capacity())
+            .find_map(|pattern| make_temporary_directory(pattern))?;
+        let mut handle = Handle {
+            socket_path: CString::default(),
+            alias_directory: Some(alias_directory.clone()),
+        };
+        let run_directory = engine_socket
+            .rsplit_once('/')
+            .map_or(engine_socket, |(parent, _)| parent);
+        symlink(run_directory, format!("{alias_directory}/r")).ok()?;
+        handle.socket_path = CString::new(format!("{alias_directory}{ALIAS_SOCKET}")).ok()?;
+        Some(handle)
+    }
+}
+
+impl Drop for Handle {
+    fn drop(&mut self) {
+        if let Some(directory) = &self.alias_directory {
+            let _ = fs::remove_file(format!("{directory}/r"));
+            let _ = fs::remove_dir(directory);
+        }
+    }
+}
+
+fn sun_path_capacity() -> usize {
+    mem::size_of::<libc::sockaddr_un>() - mem::offset_of!(libc::sockaddr_un, sun_path)
+}
+
+fn make_temporary_directory(pattern: &str) -> Option<String> {
+    let mut template = CString::new(pattern).ok()?.into_bytes_with_nul();
+    if unsafe { libc::mkdtemp(template.as_mut_ptr().cast()) }.is_null() {
+        return None;
+    }
+    template.pop();
+    String::from_utf8(template).ok()
+}
+
+thread_local! {
+    static LAST_OPEN_ERROR: RefCell<CString> = RefCell::new(CString::default());
+}
+
+fn set_last_open_error(message: &str) {
+    LAST_OPEN_ERROR.with(|error| *error.borrow_mut() = CString::new(message).unwrap_or_default());
+}
+
+fn open_failed(code: c_int, message: &str) -> c_int {
+    set_last_open_error(message);
+    code
+}
+
+unsafe fn read_parameters(
+    parameters: *const *const c_char,
+) -> Result<Vec<(String, String)>, &'static str> {
+    let mut pairs = Vec::new();
+    if parameters.is_null() {
+        return Ok(pairs);
+    }
+    let mut index = 0;
+    while !(*parameters.add(index)).is_null() {
+        let key = CStr::from_ptr(*parameters.add(index));
+        let value = *parameters.add(index + 1);
+        if key.to_bytes().is_empty() || value.is_null() {
+            return Err("parameters must be key/value pairs with non-empty keys");
+        }
+        let (Ok(key), Ok(value)) = (key.to_str(), CStr::from_ptr(value).to_str()) else {
+            return Err("parameters must be valid UTF-8");
+        };
+        parameters::check(key, value)?;
+        pairs.push((key.to_owned(), value.to_owned()));
+        index += 2;
+    }
+    Ok(pairs)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn seekdb_open(
+    directory: *const c_char,
+    parameters: *const *const c_char,
+    out_handle: *mut *mut c_void,
+) -> c_int {
+    set_last_open_error("");
+    if out_handle.is_null() {
+        return open_failed(SEEKDB_INVALID_ARGUMENT, "out_handle must not be NULL");
+    }
+    *out_handle = ptr::null_mut();
+    let pairs = match read_parameters(parameters) {
+        Ok(pairs) => pairs,
+        Err(message) => return open_failed(SEEKDB_INVALID_ARGUMENT, message),
+    };
+    let directory = if directory.is_null() {
+        None
+    } else {
+        match CStr::from_ptr(directory).to_str() {
+            Ok(directory) => Some(directory),
+            Err(_) => {
+                return open_failed(SEEKDB_INVALID_ARGUMENT, "the directory must be valid UTF-8")
+            }
+        }
+    };
+    let startup = parameters::startup();
+    let initial = parameters::initial(&pairs, &startup);
+    match engine::start(directory, startup, initial) {
+        Err(StartError::InvalidArgument(message)) => open_failed(SEEKDB_INVALID_ARGUMENT, message),
+        Err(StartError::Internal(message)) => open_failed(SEEKDB_INTERNAL_ERROR, message),
+        Ok(socket_path) => match Handle::new(&socket_path, &platform::socket_alias_patterns()) {
+            Some(handle) => {
+                *out_handle = Box::into_raw(Box::new(handle)).cast();
+                SEEKDB_SUCCESS
+            }
+            None => open_failed(SEEKDB_INTERNAL_ERROR, "cannot prepare the Unix socket path"),
+        },
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn seekdb_connection_options(
+    handle: *mut c_void,
+    out_options: *mut SeekdbConnectionOptions,
+) -> c_int {
+    if handle.is_null() || out_options.is_null() {
+        return SEEKDB_INVALID_ARGUMENT;
+    }
+    let handle = &*handle.cast::<Handle>();
+    out_options.write(SeekdbConnectionOptions {
+        transport: c"unix_socket".as_ptr(),
+        port: 0,
+        host: ptr::null(),
+        unix_socket: handle.socket_path.as_ptr(),
+        named_pipe: ptr::null(),
+        user: c"root".as_ptr(),
+    });
+    SEEKDB_SUCCESS
+}
+
+#[no_mangle]
+pub extern "C" fn seekdb_last_open_error() -> *const c_char {
+    LAST_OPEN_ERROR.with(|error| error.borrow().as_ptr())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn seekdb_close(handle: *mut c_void) -> c_int {
+    if handle.is_null() {
+        return SEEKDB_INVALID_ARGUMENT;
+    }
+    drop(Box::from_raw(handle.cast::<Handle>()));
+    SEEKDB_SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bridge::tests::PARAMETERS;
+    use std::env;
+    use std::path::Path;
+
+    fn last_error() -> String {
+        unsafe { CStr::from_ptr(seekdb_last_open_error()) }
+            .to_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    fn open(directory: &str, parameters: &[&str]) -> (c_int, *mut c_void) {
+        let directory = CString::new(directory).unwrap();
+        let strings: Vec<CString> = parameters
+            .iter()
+            .map(|value| CString::new(*value).unwrap())
+            .collect();
+        let mut pointers: Vec<*const c_char> = strings.iter().map(|value| value.as_ptr()).collect();
+        pointers.push(ptr::null());
+        let mut handle = ptr::null_mut();
+        let code = unsafe { seekdb_open(directory.as_ptr(), pointers.as_ptr(), &mut handle) };
+        (code, handle)
+    }
+
+    fn unix_socket(handle: *mut c_void) -> String {
+        let mut options = SeekdbConnectionOptions {
+            transport: ptr::null(),
+            port: 7,
+            host: c"x".as_ptr(),
+            unix_socket: ptr::null(),
+            named_pipe: c"x".as_ptr(),
+            user: ptr::null(),
+        };
+        assert_eq!(
+            unsafe { seekdb_connection_options(handle, &mut options) },
+            SEEKDB_SUCCESS
+        );
+        unsafe {
+            assert_eq!(
+                CStr::from_ptr(options.transport).to_str().unwrap(),
+                "unix_socket"
+            );
+            assert_eq!(CStr::from_ptr(options.user).to_str().unwrap(), "root");
+            assert_eq!(options.port, 0);
+            assert!(options.host.is_null() && options.named_pipe.is_null());
+            CStr::from_ptr(options.unix_socket)
+                .to_str()
+                .unwrap()
+                .to_owned()
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_arguments_before_starting() {
+        assert_eq!(
+            unsafe { seekdb_open(c"/tmp/db".as_ptr(), ptr::null(), ptr::null_mut()) },
+            SEEKDB_INVALID_ARGUMENT
+        );
+        assert_eq!(last_error(), "out_handle must not be NULL");
+        let cases: [(&str, &[&str], &str); 4] = [
+            (
+                "/tmp/db",
+                &["port", "3306"],
+                "TCP is not available for the in-process engine; port must be 0",
+            ),
+            (
+                "/tmp/db",
+                &["mysql_port_mode", "enabled"],
+                "TCP is not available for the in-process engine; mysql_port_mode must be disabled",
+            ),
+            (
+                "/tmp/db",
+                &["", "1"],
+                "parameters must be key/value pairs with non-empty keys",
+            ),
+            ("relative/db", &[], "the directory must be an absolute path"),
+        ];
+        for (directory, parameters, message) in cases {
+            let (code, handle) = open(directory, parameters);
+            assert_eq!(
+                (code, handle),
+                (SEEKDB_INVALID_ARGUMENT, ptr::null_mut()),
+                "{message}"
+            );
+            assert_eq!(last_error(), message);
+        }
+        let key = CString::new("memory_budget").unwrap();
+        let odd = [key.as_ptr(), ptr::null()];
+        let mut handle = ptr::null_mut();
+        assert_eq!(
+            unsafe { seekdb_open(c"/tmp/db".as_ptr(), odd.as_ptr(), &mut handle) },
+            SEEKDB_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            last_error(),
+            "parameters must be key/value pairs with non-empty keys"
+        );
+        assert_eq!(
+            unsafe { seekdb_close(ptr::null_mut()) },
+            SEEKDB_INVALID_ARGUMENT
+        );
+    }
+
+    #[test]
+    fn long_socket_paths_get_a_short_alias() {
+        let engine_socket = format!("/{}/run/sql.sock", "d".repeat(120));
+        let pattern = format!("/tmp/in-process-alias-{}-XXXXXX", std::process::id());
+        let too_long = format!("/tmp/{}-XXXXXX", "p".repeat(90));
+        assert!(Handle::new(&engine_socket, std::slice::from_ref(&too_long)).is_none());
+        let handle = Handle::new(&engine_socket, &[too_long, pattern]).unwrap();
+        let alias = handle.alias_directory.clone().unwrap();
+        assert_eq!(
+            handle.socket_path.to_str().unwrap(),
+            format!("{alias}/r/sql.sock")
+        );
+        assert_eq!(
+            fs::read_link(format!("{alias}/r")).unwrap(),
+            Path::new(&engine_socket).parent().unwrap()
+        );
+        drop(handle);
+        assert!(!Path::new(&alias).exists());
+        let short = Handle::new("/tmp/db/run/sql.sock", &[]).unwrap();
+        assert_eq!(short.socket_path.to_str().unwrap(), "/tmp/db/run/sql.sock");
+        assert!(short.alias_directory.is_none());
+    }
+
+    #[test]
+    fn opens_one_directory_per_process() {
+        let root = env::temp_dir().join(format!("in-process-open-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let directory = root.join("db");
+        let directory = directory.to_str().unwrap();
+        let (code, first) = open(
+            directory,
+            &["memory_budget", "3G", "port", "0", "syslog_max_file", "10"],
+        );
+        assert_eq!(code, SEEKDB_SUCCESS, "{}", last_error());
+        assert_eq!(last_error(), "");
+        let canonical = fs::canonicalize(directory)
+            .unwrap()
+            .into_os_string()
+            .into_string()
+            .unwrap();
+        assert_eq!(unix_socket(first), format!("{canonical}/run/sql.sock"));
+        assert_eq!(
+            *PARAMETERS.lock().unwrap(),
+            [
+                "mysql_port_mode",
+                "disabled",
+                "memory_budget",
+                "3G",
+                "log_disk_size",
+                "2G",
+                "syslog_max_file",
+                "10"
+            ]
+        );
+        for name in ["run", "etc", "log"] {
+            assert!(Path::new(&canonical).join(name).is_dir(), "{name}");
+        }
+        let (code, second) = open(&format!("{}/./db/", root.to_str().unwrap()), &[]);
+        assert_eq!(code, SEEKDB_SUCCESS, "{}", last_error());
+        assert_eq!(unix_socket(second), format!("{canonical}/run/sql.sock"));
+        let (code, other) = open(root.join("other").to_str().unwrap(), &[]);
+        assert_eq!((code, other), (SEEKDB_INTERNAL_ERROR, ptr::null_mut()));
+        assert_eq!(
+            last_error(),
+            "another directory is already open in this process"
+        );
+        assert_eq!(unsafe { seekdb_close(first) }, SEEKDB_SUCCESS);
+        assert_eq!(unsafe { seekdb_close(second) }, SEEKDB_SUCCESS);
+        let _ = fs::remove_dir_all(&root);
+    }
+}

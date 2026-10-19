@@ -12,19 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#pragma once
+use std::env;
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-int seekdb_in_process_start(const char *absolute_directory, const char *const *startup_parameters,
-                            const char *const *initial_parameters);
-
-const char *seekdb_in_process_get_socket_path(void);
-
-const char *seekdb_in_process_get_start_error(void);
-
-#ifdef __cplusplus
+fn main() {
+    let unix = env::var_os("CARGO_CFG_UNIX").is_some();
+    let emscripten = env::var("CARGO_CFG_TARGET_OS").is_ok_and(|os| os == "emscripten");
+    if unix && !emscripten {
+        cxx_build::bridge("src/bridge.rs")
+            .include("include")
+            .std("c++17")
+            .compile("in_process_cxx");
+    }
+    println!("cargo:rerun-if-changed=src/bridge.rs");
+    println!("cargo:rerun-if-changed=include/in_process_server.h");
 }
-#endif
