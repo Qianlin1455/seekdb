@@ -1,6 +1,6 @@
 # Build seekdb for iOS
 
-Cross-compile seekdb on an Apple Silicon Mac into `SeekDB.framework`, a dynamic framework that runs the engine inside an iOS app, for arm64 devices or the arm64 simulator.
+Cross-compile seekdb on an Apple Silicon Mac for arm64 iOS devices or the arm64 simulator, either as the `seekdb` binary or as `SeekDB.framework`, a dynamic framework that runs the engine inside an iOS app. An iOS app cannot start another process, so apps embed the framework.
 
 ## Prerequisites
 
@@ -11,23 +11,29 @@ Cross-compile seekdb on an Apple Silicon Mac into `SeekDB.framework`, a dynamic 
 
 ## Build
 
-Use the iOS entry point. It initializes the dependencies, configures the build, and builds the framework:
+Use the iOS entry point. It initializes the dependencies, configures the build, and builds the `seekdb` binary; add `--framework` to build `SeekDB.framework` instead:
 
 ```bash
-./build.sh release --ios --init --make -j8               # arm64 device
-./build.sh release --ios --simulator --init --make -j8   # arm64 simulator
+./build.sh release --ios --init --make -j8                           # seekdb, arm64 device
+./build.sh release --ios --simulator --init --make -j8               # seekdb, arm64 simulator
+./build.sh release --ios --framework --init --make -j8               # SeekDB.framework, arm64 device
+./build.sh release --ios --simulator --framework --init --make -j8   # SeekDB.framework, arm64 simulator
 ```
 
 `--init` runs `dep_create.sh` and `rustup toolchain install` as the Android build does, and also builds the iOS libraries from the pinned sources in `deps/ios-build` into `deps/ios/<sdk>/devel`; later runs reuse the libraries that are still current. Leave out `--init` once the dependencies exist. Without `--make`, `build.sh` only configures the build.
 
-The framework is generated at:
+The outputs are generated at:
 
 ```text
-build_ios_release/framework/SeekDB.framework             # device
-build_ios_simulator_release/framework/SeekDB.framework   # simulator
+build_ios_release/src/observer/seekdb                    # seekdb, device
+build_ios_simulator_release/src/observer/seekdb          # seekdb, simulator
+build_ios_release/framework/SeekDB.framework             # framework, device
+build_ios_simulator_release/framework/SeekDB.framework   # framework, simulator
 ```
 
-Pass CMake options before `--make`: `-DCMAKE_BUILD_TYPE=Debug` builds a Debug framework, and `-DDEP_DIR=/path` uses another iOS dependency directory. `./build.sh clean` removes both build directories.
+The binary and the framework share the build directory of their SDK; switching between them only reconfigures it.
+
+Pass CMake options before `--make`: `-DCMAKE_BUILD_TYPE=Debug` builds a Debug binary or framework, and `-DDEP_DIR=/path` uses another iOS dependency directory. `./build.sh clean` removes both build directories.
 
 The iOS CMake build does not provide an `all_tests` target. Validate affected unit tests on a supported Linux host by following [Write and run unit tests](unittest.md).
 

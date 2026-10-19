@@ -38,8 +38,8 @@ Usage:
   ./build.sh -h
   ./build.sh init [--android | --ios [--simulator] | --wasm]
   ./build.sh clean
-  ./build.sh release [--init] [--android | --ios [--simulator] | --wasm] [-DName=Value ...]
-  ./build.sh release [--init] [--android | --ios [--simulator] | --wasm] [-DName=Value ...] --make [MakeOptions]
+  ./build.sh release [--init] [--android | --ios [--simulator] [--framework] | --wasm] [-DName=Value ...]
+  ./build.sh release [--init] [--android | --ios [--simulator] [--framework] | --wasm] [-DName=Value ...] --make [MakeOptions]
   ./build.sh sanity [--init] [-DName=Value ...]
   ./build.sh sanity [--init] [-DName=Value ...] --make [MakeOptions]
   ./build.sh {rpm|deb|tgz} [--init] [-DName=Value ...]
@@ -53,8 +53,9 @@ Supported compatibility build:
   instrumentation enabled.
   Host platforms: Linux and macOS. Android cross-compilation: arm64-v8a.
   iOS cross-compilation on macOS with Xcode: arm64 iPhone, or the Apple Silicon
-  iOS simulator with --simulator; --make builds SeekDB.framework. For iOS,
-  --init also builds deps/ios-build into deps/ios/<sdk>/devel.
+  iOS simulator with --simulator; --make builds the seekdb binary, or
+  SeekDB.framework with --framework. For iOS, --init also builds deps/ios-build
+  into deps/ios/<sdk>/devel.
   iOS also accepts -DCMAKE_BUILD_TYPE=Debug.
   WebAssembly (--wasm): the browser engine seekdb_wasm_database in
   build_wasm_engine, built with the Emscripten version named in
@@ -75,6 +76,7 @@ Examples:
   ./build.sh tgz --init --make -j16 tgz
   ./build.sh release --android --init --make -j16
   ./build.sh release --ios --simulator --init --make -j8
+  ./build.sh release --ios --simulator --framework --make -j8
   ./build.sh release --wasm --init --make
 
 On Linux, CMake also provides module unit-test targets and the pretest aggregate.
@@ -351,7 +353,6 @@ function configure_cmake
       -DCMAKE_SYSTEM_NAME=iOS
       "-DCMAKE_OSX_SYSROOT=${ios_sdk}"
       -DOB_DISABLE_PIE=OFF
-      -DSEEKDB_IOS_FRAMEWORK=ON
       -DOB_ENABLE_STANDBY=OFF
     )
   fi
@@ -402,6 +403,7 @@ function do_release
   local collecting_make_args=false
   local android_build=false
   local ios_build=false
+  local framework_build=false
   local simulator=false
   local wasm_build=false
   local platform
@@ -420,7 +422,9 @@ function do_release
         ;;
       --ios)
         ios_build=true
-        make_target=seekdb_ios_framework
+        ;;
+      --framework)
+        framework_build=true
         ;;
       --simulator)
         simulator=true
@@ -461,10 +465,19 @@ function do_release
     shift
   done
 
+  if [[ "${framework_build}" == true && "${ios_build}" == false ]]; then
+    fail "--framework requires --ios"
+  fi
   platform="$(select_platform "${android_build}" "${ios_build}" "${simulator}" "${wasm_build}")" || exit $?
   require_host
   if [[ "${need_init}" == true ]]; then
     do_init "${platform}" || exit $?
+  fi
+  if [[ "${framework_build}" == true ]]; then
+    make_target=seekdb_ios_framework
+    cmake_args+=(-DSEEKDB_IOS_FRAMEWORK=ON)
+  elif [[ "${ios_build}" == true ]]; then
+    cmake_args+=(-DSEEKDB_IOS_FRAMEWORK=OFF)
   fi
 
   build_dir="$(release_build_dir "${platform}")"
@@ -506,7 +519,7 @@ function do_sanity
         need_make=true
         collecting_make_args=true
         ;;
-      --android|--ios|--simulator|--wasm|--coverage|--ob-make)
+      --android|--ios|--simulator|--framework|--wasm|--coverage|--ob-make)
         fail "$1 is outside the CMake Sanity build boundary"
         ;;
       -D*)
@@ -587,7 +600,7 @@ function do_package
         need_make=true
         collecting_make_args=true
         ;;
-      --android|--ios|--simulator|--wasm|--coverage|--ob-make)
+      --android|--ios|--simulator|--framework|--wasm|--coverage|--ob-make)
         fail "$1 is outside the CMake ${package_label} compatibility boundary"
         ;;
       -D*)

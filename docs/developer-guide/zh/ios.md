@@ -1,6 +1,6 @@
 # 在 iOS 上构建 seekdb
 
-本文介绍如何在 Apple Silicon Mac 上将 seekdb 交叉编译为 `SeekDB.framework`。这是一个在 iOS App 进程内运行引擎的动态 framework，支持 arm64 真机和 arm64 模拟器。
+本文介绍如何在 Apple Silicon Mac 上为 arm64 iOS 真机或 arm64 模拟器交叉编译 seekdb，产物可以是 `seekdb` 可执行文件，也可以是 `SeekDB.framework`。后者是一个在 iOS App 进程内运行引擎的动态 framework。iOS App 不能启动其他进程，所以 App 中要嵌入 framework。
 
 ## 前置条件
 
@@ -11,23 +11,29 @@
 
 ## 构建
 
-使用 iOS 构建入口，一次完成依赖初始化、配置和编译：
+使用 iOS 构建入口，一次完成依赖初始化、配置和编译，默认编译 `seekdb` 可执行文件；加上 `--framework` 则改为编译 `SeekDB.framework`：
 
 ```bash
-./build.sh release --ios --init --make -j8               # arm64 真机
-./build.sh release --ios --simulator --init --make -j8   # arm64 模拟器
+./build.sh release --ios --init --make -j8                           # seekdb，arm64 真机
+./build.sh release --ios --simulator --init --make -j8               # seekdb，arm64 模拟器
+./build.sh release --ios --framework --init --make -j8               # SeekDB.framework，arm64 真机
+./build.sh release --ios --simulator --framework --init --make -j8   # SeekDB.framework，arm64 模拟器
 ```
 
 `--init` 与 Android 构建一样执行 `dep_create.sh` 和 `rustup toolchain install`，另外会用 `deps/ios-build` 中固定版本的源码编译 iOS 依赖库，安装到 `deps/ios/<sdk>/devel`；之后再执行时，仍然有效的依赖库会直接复用。依赖准备好后可以去掉 `--init`。不加 `--make` 时，`build.sh` 只生成构建规则。
 
-framework 位于：
+产物位于：
 
 ```text
-build_ios_release/framework/SeekDB.framework             # 真机
-build_ios_simulator_release/framework/SeekDB.framework   # 模拟器
+build_ios_release/src/observer/seekdb                    # seekdb，真机
+build_ios_simulator_release/src/observer/seekdb          # seekdb，模拟器
+build_ios_release/framework/SeekDB.framework             # framework，真机
+build_ios_simulator_release/framework/SeekDB.framework   # framework，模拟器
 ```
 
-CMake 选项写在 `--make` 之前：`-DCMAKE_BUILD_TYPE=Debug` 构建 Debug 版本，`-DDEP_DIR=/path` 使用其他 iOS 依赖目录。`./build.sh clean` 会删除这两个构建目录。
+可执行文件和 framework 共用对应 SDK 的构建目录，在两者之间切换只会重新生成构建规则。
+
+CMake 选项写在 `--make` 之前：`-DCMAKE_BUILD_TYPE=Debug` 构建 Debug 版本的可执行文件或 framework，`-DDEP_DIR=/path` 使用其他 iOS 依赖目录。`./build.sh clean` 会删除这两个构建目录。
 
 iOS CMake 构建不提供 `all_tests` 目标。单元测试修改应按照[编写与运行单元测试](unittest.md)中的流程，在受支持的 Linux 主机上验证。
 

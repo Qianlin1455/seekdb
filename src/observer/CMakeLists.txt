@@ -73,6 +73,9 @@ endif()
 target_link_libraries(ob_main PUBLIC ob_base)
 
 add_executable(seekdb)
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  set_target_properties(seekdb PROPERTIES MACOSX_BUNDLE OFF)
+endif()
 if(WIN32)
   get_filename_component(CLANG_BIN_DIR ${CMAKE_CXX_COMPILER} DIRECTORY)
   get_filename_component(LLVM_ROOT ${CLANG_BIN_DIR} DIRECTORY)
@@ -109,7 +112,7 @@ if(ENABLE_SANITY)
   endif()
 endif()
 
-if(APPLE AND OB_HAVE_BUNDLED_JEMALLOC)
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND OB_HAVE_BUNDLED_JEMALLOC)
   # jemalloc's macOS allocator takeover lives in a standalone archive member.
   # Force it into seekdb so its zone registration constructor is retained.
   target_link_options(seekdb PRIVATE "-Wl,-u,_je_zone_register")
