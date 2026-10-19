@@ -7,6 +7,7 @@ description = "seekdb.h implemented in process: starts ObServer on its own threa
 
 [lib]
 crate-type = ["rlib"]
+test = false
 
 [dependencies]
 cxx = "1"

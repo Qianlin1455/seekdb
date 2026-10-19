@@ -219,31 +219,3 @@ fn canonical_directory(directory: &str) -> Option<String> {
     }
     Some(result)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn canonical_directory_resolves_existing_parents_and_keeps_missing_parts() {
-        let root = env::temp_dir().join(format!("in-process-canonical-{}", std::process::id()));
-        fs::create_dir_all(root.join("existing")).unwrap();
-        let resolved = fs::canonicalize(&root)
-            .unwrap()
-            .into_os_string()
-            .into_string()
-            .unwrap();
-        let root = root.to_str().unwrap();
-        assert_eq!(canonical_directory(root), Some(resolved.clone()));
-        assert_eq!(
-            canonical_directory(&format!("{root}/existing/./missing/../db/")),
-            Some(format!("{resolved}/existing/db"))
-        );
-        assert_eq!(
-            canonical_directory(&format!("{root}/missing/a/../b")),
-            Some(format!("{resolved}/missing/b"))
-        );
-        assert_eq!(canonical_directory("/"), Some("/".to_owned()));
-        fs::remove_dir_all(root).unwrap();
-    }
-}

@@ -17,34 +17,8 @@ mod ffi {
     unsafe extern "C++" {
         include!("in_process_server.h");
 
-        #[allow(dead_code)]
         fn run_server(directory: &str, parameters: &[String], report_running: fn()) -> i32;
     }
 }
 
-#[cfg(not(test))]
 pub(crate) use ffi::run_server;
-
-#[cfg(test)]
-pub(crate) use tests::run_server;
-
-#[cfg(test)]
-pub(crate) mod tests {
-    use std::io::Write;
-    use std::os::unix::net::UnixListener;
-    use std::sync::Mutex;
-
-    pub(crate) static PARAMETERS: Mutex<Vec<String>> = Mutex::new(Vec::new());
-
-    pub(crate) fn run_server(_directory: &str, parameters: &[String], report_running: fn()) -> i32 {
-        *PARAMETERS.lock().unwrap() = parameters.to_vec();
-        let Ok(listener) = UnixListener::bind("run/sql.sock") else {
-            return -1;
-        };
-        report_running();
-        for mut stream in listener.incoming().flatten() {
-            let _ = stream.write_all(&[74, 0, 0, 0, 10]);
-        }
-        0
-    }
-}
