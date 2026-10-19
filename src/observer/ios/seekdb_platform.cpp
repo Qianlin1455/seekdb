@@ -17,18 +17,6 @@
 #include "seekdb_platform.h"
 #include <cstdlib>
 #include <TargetConditionals.h>
-#include <jemalloc/jemalloc.h>
-
-/** Complete allocator bootstrap on the loading thread before engine workers can initialize it. */
-__attribute__((constructor)) static void initialize_framework_allocator()
-{
-  // Refuse a partially initialized allocator before a short-lived loader thread can retain bootstrap TSD.
-  void *allocation = je_malloc(1);
-  if (allocation == nullptr) {
-    std::abort();
-  }
-  je_free(allocation);
-}
 
 namespace seekdb_platform {
 const char *const *extra_startup_parameters()
